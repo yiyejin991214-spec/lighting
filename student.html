@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ko"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;700&family=Jua&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
+<title>별빛 등대 지키기</title>
+<script src="config.js"></script><script src="common.js"></script>
+</head><body><main class="wrap narrow">
+
+<section id="v-join" class="view glass">
+  <h1 class="center">🏮 별빛 등대</h1>
+  <label>방 번호</label><input id="room" class="num" inputmode="numeric" maxlength="4" placeholder="4자리">
+  <label>내 이름 (별명도 좋아요, 1~10자)</label><input id="nick" maxlength="10">
+  <label>내 바다 친구</label><div id="vehs" class="vehs"></div>
+  <button id="go" class="btn btn-yellow" style="width:100%">들어가기</button><p id="err" class="err"></p>
+</section>
+
+<section id="v-wait" class="view glass center" hidden>
+  <div id="wv" style="font-size:90px"></div><h2 id="wn"></h2>
+  <p id="wmsg" class="glass">선생님이 시작하면 바로 문제가 나와요!</p>
+  <p><a href="#" id="again" style="color:#ffd65a">다른 이름으로 다시 들어가기</a></p>
+</section>
+
+<section id="v-play" class="view" hidden>
+  <div class="glass hdrs"><span><span id="pv"></span> <span id="pn"></span></span><span><span id="sc" class="tag num">⭐ 0</span> <span id="st" class="tag num">🔥 0</span></span></div>
+  <div class="hdrs" style="margin:10px 4px 4px"><small>🏮 우리 반 등대 불빛 <b id="lp" class="num"></b></small><b id="tm" class="num">00:00</b></div>
+  <div id="gauge" class="gauge"><i style="width:100%"></i></div>
+  <div id="storm" class="warn" hidden>⛈️ 폭풍이 왔어요! 불빛이 빨리 꺼져요. 힘내요!</div>
+  <div class="glass center" style="margin-top:12px"><span id="cat" class="pill"></span><div id="q" class="q"></div><div id="fb" class="fb"></div></div>
+  <div id="opts" class="opts"></div>
+</section>
+
+<section id="v-end" class="view glass center" hidden>
+  <h2 id="emsg"></h2><div id="estars" class="stars" style="font-size:64px"></div>
+  <div id="ev" class="big"></div><div id="en"></div>
+  <p class="glass">내가 켠 빛 <b id="mine" class="num" style="font-size:36px;color:#ffd65a"></b>개</p>
+  <div id="eaw"></div><p>선생님 화면에서 결과를 함께 봐요!</p>
+</section>
+</main>
+<div id="sync" class="sync"></div>
+
+<script>
+let me = JSON.parse(sessionStorage.getItem('lh-player') || 'null'), room = null, cur = null, lt = null, busy = false, loading = false, sync = null, sel = SEA[0], celeb = false;
+const code = new URLSearchParams(location.search).get('code');
+if (code) $('#room').value = code.replace(/\D/g, '').slice(0, 4);
+
+/* Step 2: 입장 */
+SEA.forEach(v => {
+  const b = el('button', 'veh' + (v === sel ? ' on' : ''), v); b.type = 'button';
+  b.onclick = () => { sel = v; $$('.veh').forEach(x => x.classList.toggle('on', x === b)); };
+  $('#vehs').append(b);
+});
+$('#go').onclick = async () => {
+  try {
+    $('#err').textContent = '';
+    const rm = $('#room').value.trim(), nick = $('#nick').value.trim();
+    const r = await rpc('join_room', { p_room: rm, p_nick: nick, p_animal: sel });
+    me = { player_id: r.player_id, token: r.token, room: rm, nick, animal: sel };
+    sessionStorage.setItem('lh-player', JSON.stringify(me)); begin();
+  } catch (e) { $('#err').textContent = e.message; }
+};
+$('#again').onclick = e => { e.preventDefault(); leave(); };
+function leave() { if (sync) sync.stop(); sync = null; sessionStorage.removeItem('lh-player'); me = null; cur = null; show('v-join'); }
+async function begin() {
+  $('#wv').textContent = me.animal; $('#wn').textContent = me.nick; $('#pv').textContent = me.animal; $('#pn').textContent = me.nick;
+  await syncClock(); if (sync) sync.stop();
+  sync = startSync([{ table: 'rooms', filter: 'id=eq.' + me.room }], refresh); refresh();
+}
+
+/* Step 3: 방 상태에 따라 화면 선택 */
+async function refresh() {
+  if (!me || loading) return;
+  const { data: rm } = await db.from('rooms').select('*').eq('id', me.room).maybeSingle();
+  if (!rm) { leave(); return; }
+  room = rm;
+  if (rm.status === 'waiting') { show('v-wait'); $('#wmsg').textContent = '선생님이 시작하면 바로 문제가 나와요!'; }
+  else if (rm.status === 'playing') { pollLight(); if (!cur && !busy) await loadQ(); }
+  else await endView();
+}
+async function pollLight() { const { data } = await db.from('lights').select('*').eq('room_id', me.room).maybeSingle(); if (data) lt = data; }
+setInterval(() => { if (room && room.status === 'playing') pollLight(); }, 3000);
+setInterval(() => {
+  if (!room || room.status !== 'playing' || !room.ends_at) return;
+  $('#tm').textContent = mmss(Date.parse(room.ends_at) - now());
+  if (lt) { const L = lightNow(lt, room); $('#lp').textContent = Math.round(L) + '%'; $('#gauge i').style.width = L + '%'; $('#gauge').classList.toggle('low', L < 25); }
+  $('#storm').hidden = !(room.storm_until && Date.parse(room.storm_until) - now() > 0);
+}, 250);
+
+/* Step 4: 문제 풀기 (정답은 DB가 채점) */
+async function loadQ() {
+  loading = true;
+  try {
+    const r = await rpc('next_question', { p_player: me.player_id, p_token: me.token });
+    if (r.status === 'playing') { cur = r; show('v-play'); renderQ(); }
+    else if (r.status === 'closing') { show('v-wait'); $('#wmsg').textContent = '시간 끝! 결과를 기다리는 중이에요 🏮'; }
+  } catch (e) { console.error(e); }
+  loading = false;
+  if (room && room.status === 'ended') endView();
+}
+function renderQ() {
+  $('#cat').textContent = CATS[cur.cat] || ''; $('#q').textContent = cur.q; $('#fb').textContent = '';
+  $('#opts').replaceChildren(...cur.choices.map((c, i) => { const b = el('button', 'opt opt-' + (i + 1), c); b.onclick = () => pick(b, c); return b; }));
+}
+async function pick(btn, choice) {
+  if (busy) return; busy = true;
+  let r;
+  try { r = await rpc('submit_answer', { p_player: me.player_id, p_token: me.token, p_choice: choice }); }
+  catch (e) { busy = false; return; }
+  if (r.result === 'closed') { busy = false; cur = null; refresh(); return; }
+  if (r.result === 'locked') { busy = false; return; }
+  lt = { light: r.light, light_at: r.light_at, n: r.n };
+  $$('.opt').forEach(b => { if (b.textContent === r.correct_answer) b.classList.add('good'); });
+  $('#sc').textContent = '⭐ ' + r.correct; $('#st').textContent = '🔥 ' + r.streak;
+  if (r.result === 'wrong') { btn.classList.add('bad', 'shake'); $('#fb').textContent = '앗! 정답은 ' + r.correct_answer + ' (다음엔 맞힐 수 있어요!)'; }
+  else {
+    $('#fb').textContent = r.combo ? `🔥 콤보! 등대 불빛 +${r.gain}` : `정답! 등대 불빛 +${r.gain}`;
+    if (r.combo) confetti({ particleCount: 70, spread: 70, origin: { y: .7 } });
+  }
+  await sleep(r.result === 'correct' ? (r.combo ? 900 : 550) : 1100);
+  cur = r.next && r.next.q ? r.next : null; busy = false;
+  if (cur) renderQ(); else refresh();
+}
+
+/* Step 6: 끝 화면 (순위 없이 별 등급과 내 기여) */
+async function endView() {
+  if (loading) return; loading = true;
+  try {
+    const { data } = await db.from('players').select('*').eq('room_id', me.room);
+    const pl = data || [], p = pl.find(x => x.id === me.player_id);
+    if (!p) { leave(); return; }
+    const st = starsOf(pl, room);
+    show('v-end'); $('#ev').textContent = p.animal; $('#en').textContent = p.nickname;
+    $('#emsg').textContent = room.ended_reason === 'dark' ? '등대가 꺼졌어요 😢 다시 도전해요!' : '🎉 우리 반이 등대를 지켰어요!';
+    $('#estars').textContent = st ? '⭐'.repeat(st) : '🌑'; $('#mine').textContent = p.correct;
+    $('#eaw').replaceChildren(...awardsOf(pl).map(a => { const d = el('div', 'tag', `${a.t}: ${a.names}`); d.style.margin = '6px 0'; return d; }));
+    if (!celeb && st) { celeb = true; confetti({ particleCount: 140, spread: 90, origin: { y: .5 } }); }
+  } catch (e) { console.error(e); }
+  loading = false;
+}
+if (me) begin(); else show('v-join');
+</script></body></html>
